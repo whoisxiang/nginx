@@ -1,0 +1,14 @@
+#!/bin/sh
+# prerm for nginx (built from source)
+set -e
+
+if [ -d /run/systemd/system ]; then
+    case "$1" in
+        remove|deconfigure)
+            systemctl stop nginx.service >/dev/null 2>&1 || true
+            systemctl disable nginx.service >/dev/null 2>&1 || true
+            ;;
+    esac
+fi
+
+exit 0

@@ -1,0 +1,18 @@
+#!/bin/sh
+# postrm for nginx (built from source)
+set -e
+
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload >/dev/null 2>&1 || true
+fi
+
+case "$1" in
+    purge)
+        rm -rf /var/log/nginx /var/lib/nginx /etc/nginx
+        ;;
+    remove)
+        rm -rf /var/lib/nginx/tmp
+        ;;
+esac
+
+exit 0

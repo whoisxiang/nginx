@@ -1,0 +1,136 @@
+# nginx.spec.in -- 模板。packaging/build-rpm.sh 会把 @VERSION@ / @NGINX_USER@
+# 替换掉再交给 rpmbuild，所以不要直接改这个文件里的版本号。
+
+%global nginx_user @NGINX_USER@
+
+Name:           nginx
+Version:        @VERSION@
+Release:        1%{?dist}
+Summary:        High performance web server and reverse proxy
+
+License:        BSD-2-Clause
+URL:            https://nginx.org/
+Source0:        %{name}-%{version}.tar.gz
+Source1:        nginx.service
+Source2:        nginx.logrotate
+Source3:        configure.args
+
+BuildRequires:  gcc
+BuildRequires:  make
+BuildRequires:  pcre-devel
+BuildRequires:  zlib-devel
+BuildRequires:  openssl-devel
+BuildRequires:  libaio-devel
+
+Requires:       shadow-utils
+
+%description
+nginx [engine x] is an HTTP and reverse proxy server, a mail proxy server and
+a generic TCP/UDP proxy server.
+
+This build comes straight from the nginx source tree with a static module set
+(SSL, HTTP/2, realip, addition, sub, dav, flv, mp4, gunzip, gzip_static,
+auth_request, random_index, secure_link, slice, stub_status, stream) and the
+same install layout as the official nginx packages.
+
+%prep
+%setup -q
+
+%build
+# 一行一个参数，来自 packaging/configure-args.sh
+mapfile -t ngx_args < %{_sourcedir}/configure.args
+./auto/configure "${ngx_args[@]}"
+make %{?_smp_mflags}
+
+%install
+rm -rf %{buildroot}
+make install DESTDIR=%{buildroot}
+
+# 运行时目录
+install -d %{buildroot}%{_sysconfdir}/nginx/conf.d
+install -d %{buildroot}%{_libdir}/nginx/modules
+install -d %{buildroot}/var/lib/nginx/tmp/client_body \
+           %{buildroot}/var/lib/nginx/tmp/proxy \
+           %{buildroot}/var/lib/nginx/tmp/fastcgi \
+           %{buildroot}/var/lib/nginx/tmp/uwsgi \
+           %{buildroot}/var/lib/nginx/tmp/scgi
+install -d %{buildroot}/var/log/nginx
+
+# systemd unit / logrotate
+install -d %{buildroot}%{_unitdir} %{buildroot}%{_sysconfdir}/logrotate.d
+install -m 0644 %{_sourcedir}/nginx.service   %{buildroot}%{_unitdir}/nginx.service
+install -m 0644 %{_sourcedir}/nginx.logrotate %{buildroot}%{_sysconfdir}/logrotate.d/nginx
+
+# nginx.conf 里的 user 必须和 --user= 一致，否则 getpwnam 直接报错
+# 用 -r 而不是 -E：CentOS 7 自带 sed 4.2.2 不支持 -E
+sed -i -r 's|^#?user[[:space:]].*|user %{nginx_user};|' %{buildroot}%{_sysconfdir}/nginx/nginx.conf
+
+# 给 http{} 加上 conf.d 的 include，和官方包行为一致
+awk '
+    /^[[:space:]]*http[[:space:]]*\{/ && !done {
+        print
+        print "    include /etc/nginx/conf.d/*.conf;"
+        done = 1
+        next
+    }
+    { print }
+' %{buildroot}%{_sysconfdir}/nginx/nginx.conf > %{buildroot}%{_sysconfdir}/nginx/nginx.conf.new
+mv %{buildroot}%{_sysconfdir}/nginx/nginx.conf.new %{buildroot}%{_sysconfdir}/nginx/nginx.conf
+
+%pre
+getent group %{nginx_user} >/dev/null || groupadd -r %{nginx_user}
+getent passwd %{nginx_user} >/dev/null || \
+    useradd -r -g %{nginx_user} -d /var/lib/nginx -s /sbin/nologin -M %{nginx_user}
+exit 0
+
+%post
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload >/dev/null 2>&1 || :
+    if [ $1 -eq 1 ]; then
+        systemctl enable nginx.service >/dev/null 2>&1 || :
+    fi
+fi
+exit 0
+
+%preun
+if [ $1 -eq 0 ] && [ -d /run/systemd/system ]; then
+    systemctl stop nginx.service >/dev/null 2>&1 || :
+    systemctl disable nginx.service >/dev/null 2>&1 || :
+fi
+exit 0
+
+%postun
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload >/dev/null 2>&1 || :
+fi
+exit 0
+
+%files
+%defattr(-,root,root,-)
+%doc LICENSE
+%{_sbindir}/nginx
+%{_unitdir}/nginx.service
+%{_libdir}/nginx
+%{_datadir}/nginx
+
+%dir %{_sysconfdir}/nginx
+%dir %{_sysconfdir}/nginx/conf.d
+%config(noreplace) %{_sysconfdir}/nginx/nginx.conf
+%config(noreplace) %{_sysconfdir}/nginx/mime.types
+%config(noreplace) %{_sysconfdir}/nginx/fastcgi.conf
+%config(noreplace) %{_sysconfdir}/nginx/fastcgi_params
+%config(noreplace) %{_sysconfdir}/nginx/scgi_params
+%config(noreplace) %{_sysconfdir}/nginx/uwsgi_params
+%config(noreplace) %{_sysconfdir}/nginx/koi-utf
+%config(noreplace) %{_sysconfdir}/nginx/koi-win
+%config(noreplace) %{_sysconfdir}/nginx/win-utf
+%config(noreplace) %{_sysconfdir}/logrotate.d/nginx
+
+%attr(0755,%{nginx_user},%{nginx_user}) %dir /var/lib/nginx
+%attr(0755,%{nginx_user},%{nginx_user}) %dir /var/lib/nginx/tmp
+%attr(0755,%{nginx_user},%{nginx_user}) %dir /var/lib/nginx/tmp/client_body
+%attr(0755,%{nginx_user},%{nginx_user}) %dir /var/lib/nginx/tmp/proxy
+%attr(0755,%{nginx_user},%{nginx_user}) %dir /var/lib/nginx/tmp/fastcgi
+%attr(0755,%{nginx_user},%{nginx_user}) %dir /var/lib/nginx/tmp/uwsgi
+%attr(0755,%{nginx_user},%{nginx_user}) %dir /var/lib/nginx/tmp/scgi
+%attr(0750,%{nginx_user},%{nginx_user}) %dir /var/log/nginx
