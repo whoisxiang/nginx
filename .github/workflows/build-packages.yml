@@ -1,0 +1,138 @@
+name: build-nginx-packages
+
+# 触发方式：
+#   1. Actions 页面手动 Run workflow（可填 ref 指定分支/tag）
+#   2. push 到 master/main
+#   3. push 任意 tag（例如 git tag v1.29.0-1 && git push --tags）
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "要构建的分支或标签，留空 = 触发本次运行的分支"
+        required: false
+        default: ""
+  push:
+    branches: [master, main]
+    tags: ["v*"]
+    paths-ignore:
+      - "**/*.md"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  packages:
+    name: nginx-${{ matrix.distro }}-${{ matrix.format }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # CentOS 7：glibc 2.17 + OpenSSL 1.0.2k（不支持 TLS 1.3）
+          - distro: centos7
+            format: rpm
+            image: quay.io/centos/centos:7
+            fallback: docker.io/library/centos:7
+            artifact: nginx-rpm-centos7
+          # Ubuntu 20.04：glibc 2.31 + OpenSSL 1.1.1
+          - distro: ubuntu2004
+            format: deb
+            image: docker.io/library/ubuntu:20.04
+            fallback: ""
+            artifact: nginx-deb-ubuntu2004
+          # Ubuntu 22.04：glibc 2.35 + OpenSSL 3.0
+          - distro: ubuntu2204
+            format: deb
+            image: docker.io/library/ubuntu:22.04
+            fallback: ""
+            artifact: nginx-deb-ubuntu2204
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          fetch-depth: 0
+
+      - name: Detect nginx version
+        id: meta
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^#define[[:space:]]\+NGINX_VERSION[[:space:]]\+"\([^"]*\)".*/\1/p' src/core/nginx.h | head -n1)"
+          if [ -z "$version" ]; then
+            echo "::error::src/core/nginx.h 里找不到 NGINX_VERSION"
+            exit 1
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "building nginx ${version}"
+
+      - name: Normalise line endings of build scripts
+        run: find packaging -type f -exec sed -i 's/\r$//' {} +
+
+      - name: Create source tarball
+        env:
+          VER: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          git archive --format=tar.gz --prefix="nginx-${VER}/" \
+            -o "dist/nginx-${VER}.tar.gz" HEAD
+          tar -tzf "dist/nginx-${VER}.tar.gz" | head -n 5
+
+      - name: Resolve container image
+        id: image
+        env:
+          PRIMARY: ${{ matrix.image }}
+          FALLBACK: ${{ matrix.fallback }}
+        run: |
+          set -euo pipefail
+          if docker pull -q "$PRIMARY"; then
+            resolved="$PRIMARY"
+          elif [ -n "$FALLBACK" ] && docker pull -q "$FALLBACK"; then
+            resolved="$FALLBACK"
+          else
+            echo "::error::cannot pull ${PRIMARY} (fallback: ${FALLBACK:-none})"
+            exit 1
+          fi
+          echo "resolved=${resolved}" >> "$GITHUB_OUTPUT"
+          echo "using image ${resolved}"
+
+      - name: Build ${{ matrix.format }} package
+        env:
+          VER: ${{ steps.meta.outputs.version }}
+          IMAGE: ${{ steps.image.outputs.resolved }}
+          KIND: ${{ matrix.format }}
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          docker run --rm \
+            --volume "$PWD:/work" \
+            --workdir /work \
+            --env NGINX_VERSION="$VER" \
+            --env DIST_DIR=/work/dist \
+            --env OUT_DIR=/work/out \
+            "$IMAGE" \
+            bash "/work/packaging/build-${KIND}.sh"
+
+      - name: Fix file ownership
+        if: always()
+        run: sudo chown -R "$(id -u):$(id -g)" dist out 2>/dev/null || true
+
+      - name: Collect package info
+        if: success()
+        run: |
+          set -euo pipefail
+          find out -maxdepth 1 -type f -printf '%f  %s bytes\n' | sort
+
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}-${{ steps.meta.outputs.version }}
+          path: out/*
+          if-no-files-found: error
+          retention-days: 30
