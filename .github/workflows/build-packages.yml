@@ -10,7 +10,7 @@ on:
       ref:
         description: "要构建的分支或标签，留空 = 触发本次运行的分支"
         required: false
-        default: ""
+        default: "release-1.30.7"
   push:
     branches: [master, main]
     tags: ["v*"]
